@@ -1,0 +1,20 @@
+# The retained paper implementation is intentionally not part of this image.
+Telco-RAG_api/
+
+# Local development state and secrets.
+.git/
+.codegraph/
+.agents/
+.codex/
+backup/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+newbaseline/.venv/
+newbaseline/.env
+.env
+
+# Rebuildable caches/checkpoints. Completed vectors and all experiment outputs
+# remain in the image so the reported experiments can be inspected offline.
+dataset/**/.cache/
+dataset/3gpp/Embeddings/**/.partial/
