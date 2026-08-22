@@ -221,6 +221,9 @@ class TeleQnATests(unittest.TestCase):
         self.assertEqual(comparison["accuracy_delta"], 0.5)
         self.assertEqual(comparison["improved"], 1)
         self.assertEqual(manifest["llm_temperature"], 0.0)
+        self.assertIn("vocabulary_mode", manifest)
+        self.assertEqual(len(manifest["vocabulary_definitions_sha256"]), 64)
+        self.assertEqual(len(manifest["vocabulary_abbreviations_sha256"]), 64)
 
 
 if __name__ == "__main__":  # pragma: no cover

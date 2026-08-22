@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -29,6 +29,15 @@ class CitationPath:
 
 
 @dataclass(frozen=True)
+class AbbreviationResolution:
+    acronym: str
+    candidates: list[dict[str, Any]]
+    selected_expansion: str | None
+    confidence: float
+    margin: float | None
+
+
+@dataclass(frozen=True)
 class RagResult:
     question: str
     rephrased_query: str
@@ -39,6 +48,7 @@ class RagResult:
     retrievals: list[RetrievalHit]
     answer: str | None
     citation_paths: list[CitationPath]
+    abbreviation_resolutions: list[AbbreviationResolution] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

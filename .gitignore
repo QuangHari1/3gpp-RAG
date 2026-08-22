@@ -5,6 +5,7 @@
 # Local credentials and runtime data
 .env
 *.toml
+!/newbaseline/pyproject.toml
 /Telco-RAG_api/*
 /Telco-RAG_api/3GPP-Release18/
 /Telco-RAG_api/
@@ -23,6 +24,8 @@
 /newbaseline/.venv/
 /newbaseline/resources/
 /newbaseline/results/
+/newbaseline/mlflow.db
+/newbaseline/mlruns/
 /wandb/
 
 # Misc

@@ -1,47 +1,72 @@
-"""Optional experiment tracking for reproducible benchmark runs."""
+"""Local MLflow tracking for reproducible TeleQnA benchmark runs."""
 
 from __future__ import annotations
 
-import hashlib
+import json
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 
-VALID_WANDB_MODES = {"disabled", "offline", "online"}
+VALID_TRACKING_MODES = {"disabled", "mlflow"}
+
+
+def scalar_params(config: dict[str, Any]) -> dict[str, str | int | float | bool]:
+    """Flatten benchmark config values into MLflow-compatible parameter scalars."""
+    values: dict[str, str | int | float | bool] = {}
+    for key, value in config.items():
+        if isinstance(value, (str, int, float, bool)):
+            values[key] = value
+        elif value is None:
+            values[key] = "null"
+        else:
+            values[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return values
 
 
 @dataclass
 class ExperimentTracker:
-    """Log benchmark summaries and durable result artifacts to W&B when enabled."""
+    """Log progress, final metrics, and durable local artifacts to MLflow."""
 
     run: Any | None = None
-    wandb: Any | None = None
-    artifact_name: str = "teleqna-benchmark"
+    mlflow: Any | None = None
 
     @property
     def enabled(self) -> bool:
-        return self.run is not None and self.wandb is not None
+        return self.run is not None and self.mlflow is not None
 
     def log_progress(self, completed: int, correct: int, evaluated: int) -> None:
         if not self.enabled:
             return
-        self.run.log(
+        self.mlflow.log_metrics(
             {
-                "benchmark/completed": completed,
-                "benchmark/correct": correct,
-                "benchmark/evaluated": evaluated,
-                "benchmark/accuracy": correct / evaluated if evaluated else 0.0,
+                "benchmark.completed": completed,
+                "benchmark.correct": correct,
+                "benchmark.evaluated": evaluated,
+                "benchmark.accuracy": correct / evaluated if evaluated else 0.0,
             },
             step=completed,
         )
 
     def log_comparison(self, comparison: dict[str, Any]) -> None:
-        """Attach a same-question benchmark comparison to the active run."""
+        """Attach same-question comparison values to the active MLflow run."""
         if not self.enabled:
             return
-        self.run.summary.update({f"comparison/{key}": value for key, value in comparison.items()})
+        metrics = {
+            f"comparison.{key}": float(value)
+            for key, value in comparison.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        if metrics:
+            self.mlflow.log_metrics(metrics)
+        tags = {
+            f"comparison.{key}": str(value)
+            for key, value in comparison.items()
+            if not isinstance(value, (int, float)) or isinstance(value, bool)
+        }
+        if tags:
+            self.mlflow.set_tags(tags)
 
     def finish(
         self,
@@ -58,68 +83,66 @@ class ExperimentTracker:
     ) -> None:
         if not self.enabled:
             return
-        summary = {
-            "benchmark/status": status,
-            "benchmark/completed": completed,
-            "benchmark/correct": correct,
-            "benchmark/evaluated": evaluated,
-            "benchmark/accuracy": correct / evaluated if evaluated else 0.0,
-        }
+        self.mlflow.log_metrics(
+            {
+                "benchmark.completed": completed,
+                "benchmark.correct": correct,
+                "benchmark.evaluated": evaluated,
+                "benchmark.accuracy": correct / evaluated if evaluated else 0.0,
+            }
+        )
+        tags = {"benchmark.status": status}
         if error:
-            summary["benchmark/error"] = error
-        self.run.summary.update(summary)
-        if results_path.exists():
-            artifact = self.wandb.Artifact(name=self.artifact_name, type="benchmark-results")
-            artifact.add_file(str(results_path), name=results_path.name)
-            if manifest_path.exists():
-                artifact.add_file(str(manifest_path), name=manifest_path.name)
-            if comparison_path and comparison_path.is_file():
-                artifact.add_file(str(comparison_path), name=comparison_path.name)
-            analysis_summary = analysis_directory / "summary.md" if analysis_directory else None
-            if (
-                analysis_directory
-                and analysis_summary
-                and analysis_summary.is_file()
-                and analysis_summary.stat().st_mtime >= results_path.stat().st_mtime
-            ):
+            tags["benchmark.error"] = error
+        self.mlflow.set_tags(tags)
+        self._log_file(results_path)
+        self._log_file(manifest_path)
+        self._log_file(comparison_path)
+        if analysis_directory and analysis_directory.is_dir():
+            summary = analysis_directory / "summary.md"
+            if summary.is_file() and summary.stat().st_mtime >= results_path.stat().st_mtime:
                 for analysis_file in sorted(analysis_directory.iterdir()):
                     if analysis_file.is_file() and analysis_file.suffix in {".csv", ".json", ".md"}:
-                        artifact.add_file(str(analysis_file), name=f"analysis/{analysis_file.name}")
-            self.run.log_artifact(artifact)
-        self.run.finish()
+                        self._log_file(analysis_file, artifact_path="analysis")
+        self.mlflow.end_run(status="FAILED" if status == "failed" else "FINISHED")
+        self.run = None
+
+    def _log_file(self, path: Path | None, artifact_path: str | None = None) -> None:
+        if path and path.is_file():
+            self.mlflow.log_artifact(str(path), artifact_path=artifact_path)
 
 
 def start_experiment_tracker(
     *,
     mode: str,
-    project: str,
-    entity: str,
-    artifact_name: str,
-    run_directory: Path,
+    experiment_name: str,
+    tracking_directory: Path,
     output_path: Path,
     config: dict[str, Any],
-    wandb_module: Any | None = None,
+    mlflow_module: Any | None = None,
+    source_fingerprint: str | None = None,
 ) -> ExperimentTracker:
-    """Create a W&B run only when tracking is deliberately enabled."""
-    if mode not in VALID_WANDB_MODES:
+    """Start a local MLflow run unless tracking is deliberately disabled."""
+    if mode not in VALID_TRACKING_MODES:
         raise ValueError(f"Unsupported experiment tracking mode: {mode}")
     if mode == "disabled":
         return ExperimentTracker()
-    wandb = wandb_module or import_module("wandb")
-    run_directory.mkdir(parents=True, exist_ok=True)
-    init_options = {
-        "project": project,
-        "entity": entity or None,
-        "mode": mode,
-        "dir": str(run_directory),
-        "name": output_path.stem,
-        "config": config,
-        "save_code": False,
+    tracking_directory.mkdir(parents=True, exist_ok=True)
+    mlflow = mlflow_module or import_module("mlflow")
+    database_path = (tracking_directory / "mlflow.db").resolve()
+    artifact_directory = (tracking_directory / "artifacts").resolve()
+    artifact_directory.mkdir(parents=True, exist_ok=True)
+    mlflow.set_tracking_uri(f"sqlite:///{database_path}")
+    if mlflow.get_experiment_by_name(experiment_name) is None:
+        mlflow.create_experiment(experiment_name, artifact_location=artifact_directory.as_uri())
+    mlflow.set_experiment(experiment_name)
+    run = mlflow.start_run(run_name=output_path.stem)
+    mlflow.log_params(scalar_params(config))
+    tags = {
+        "benchmark.output_path": str(output_path),
+        "tracking.backend": "mlflow-local",
     }
-    if mode == "online":
-        run_id = hashlib.sha256(str(output_path.resolve()).encode("utf-8")).hexdigest()[:16]
-        init_options.update({"id": run_id, "resume": "allow"})
-    run = wandb.init(
-        **init_options,
-    )
-    return ExperimentTracker(run=run, wandb=wandb, artifact_name=artifact_name)
+    if source_fingerprint:
+        tags["migration.source_fingerprint"] = source_fingerprint
+    mlflow.set_tags(tags)
+    return ExperimentTracker(run=run, mlflow=mlflow)

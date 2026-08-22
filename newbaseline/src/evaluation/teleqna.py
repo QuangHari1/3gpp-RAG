@@ -72,6 +72,16 @@ def compact_retrieval_trace(result: Any) -> dict[str, Any]:
         "router_selected_series": result.router_selected_series,
         "empty_selected_series": result.empty_selected_series,
         "searched_series": result.searched_series,
+        "abbreviation_resolutions": [
+            {
+                "acronym": resolution.acronym,
+                "candidates": resolution.candidates,
+                "selected_expansion": resolution.selected_expansion,
+                "confidence": resolution.confidence,
+                "margin": resolution.margin,
+            }
+            for resolution in getattr(result, "abbreviation_resolutions", [])
+        ],
         "retrievals": [
             {
                 "score": hit.score,

@@ -59,9 +59,18 @@ class PaperEmbeddingCorpus:
 
     def search(self, selected_series: list[str], query_embedding: np.ndarray, top_k: int) -> tuple[list[RetrievalHit], list[str], list[str]]:
         """Search selected populated groups plus summaries using inner product."""
+        hits_by_query, searched, empty = self.search_many(
+            selected_series, np.asarray(query_embedding, dtype=np.float32).reshape(1, -1), top_k
+        )
+        return hits_by_query[0], searched, empty
+
+    def search_many(
+        self, selected_series: list[str], query_embeddings: np.ndarray, top_k: int
+    ) -> tuple[list[list[RetrievalHit]], list[str], list[str]]:
+        """Search one index with many query vectors to avoid repeated FAISS setup."""
         searched, empty = self.searched_series_for(selected_series)
         if not searched:
-            return [], searched, empty
+            return [[] for _ in range(len(query_embeddings))], searched, empty
         matrices: list[np.ndarray] = []
         owners: list[str] = []
         for series in searched:
@@ -73,41 +82,46 @@ class PaperEmbeddingCorpus:
             matrices.append(np.asarray(vectors, dtype=np.float32))
             owners.extend([series] * len(vectors))
         all_vectors = np.ascontiguousarray(np.concatenate(matrices, axis=0), dtype=np.float32)
-        query = np.asarray(query_embedding, dtype=np.float32).reshape(1, -1)
-        if all_vectors.shape[1] != query.shape[1]:
-            raise ValueError(f"Corpus has {all_vectors.shape[1]} dimensions, query has {query.shape[1]}.")
+        queries = np.asarray(query_embeddings, dtype=np.float32)
+        if queries.ndim != 2 or not len(queries):
+            raise ValueError("query_embeddings must be a non-empty two-dimensional matrix.")
+        if all_vectors.shape[1] != queries.shape[1]:
+            raise ValueError(f"Corpus has {all_vectors.shape[1]} dimensions, query has {queries.shape[1]}.")
         try:
             import faiss
         except ImportError as exc:  # pragma: no cover - installation error
             raise RuntimeError("Install faiss-cpu to run semantic retrieval.") from exc
         index = faiss.IndexFlatIP(all_vectors.shape[1])
         index.add(all_vectors)
-        scores, positions = index.search(query, min(top_k, len(owners)))
+        scores, positions = index.search(np.ascontiguousarray(queries), min(top_k, len(owners)))
         offsets: dict[str, int] = {}
         offset = 0
         for series, matrix in zip(searched, matrices, strict=True):
             offsets[series] = offset
             offset += len(matrix)
-        hits: list[RetrievalHit] = []
-        for score, position in zip(scores[0], positions[0], strict=True):
-            if position < 0:
-                continue
-            series = owners[int(position)]
-            local_index = int(position) - offsets[series]
-            record = self._series[series]
-            metadata = self._load_metadata(record["metadata_file"])[local_index]
-            source_chunk_file = record["chunk_file"]
-            chunk = self._source_chunk(source_chunk_file, metadata)
-            hits.append(
-                RetrievalHit(
-                    score=float(score),
-                    series=series,
-                    text=chunk["text"],
-                    metadata=metadata,
-                    source_chunk_file=source_chunk_file,
+        hits_by_query: list[list[RetrievalHit]] = []
+        for query_scores, query_positions in zip(scores, positions, strict=True):
+            hits: list[RetrievalHit] = []
+            for score, position in zip(query_scores, query_positions, strict=True):
+                if position < 0:
+                    continue
+                series = owners[int(position)]
+                local_index = int(position) - offsets[series]
+                record = self._series[series]
+                metadata = self._load_metadata(record["metadata_file"])[local_index]
+                source_chunk_file = record["chunk_file"]
+                chunk = self._source_chunk(source_chunk_file, metadata)
+                hits.append(
+                    RetrievalHit(
+                        score=float(score),
+                        series=series,
+                        text=chunk["text"],
+                        metadata=metadata,
+                        source_chunk_file=source_chunk_file,
+                    )
                 )
-            )
-        return hits, searched, empty
+            hits_by_query.append(hits)
+        return hits_by_query, searched, empty
 
     def expand_citations(
         self,

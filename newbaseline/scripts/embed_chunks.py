@@ -386,7 +386,7 @@ def main() -> None:
         import numpy as numpy
     except ImportError as error:
         raise RuntimeError(
-            "Install dependencies first: python3 -m pip install -r newbaseline/requirements.txt"
+            "Install dependencies first: cd newbaseline && uv sync"
         ) from error
 
     global np

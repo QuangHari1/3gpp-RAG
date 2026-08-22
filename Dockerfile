@@ -1,8 +1,10 @@
+FROM ghcr.io/astral-sh/uv:0.11.8 AS uv
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PATH="/workspace/newbaseline/.venv/bin:$PATH"
 
 WORKDIR /workspace
 
@@ -10,9 +12,11 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY newbaseline/requirements.txt /tmp/requirements.txt
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --requirement /tmp/requirements.txt
+COPY --from=uv /uv /uvx /bin/
+COPY newbaseline/pyproject.toml newbaseline/uv.lock /workspace/newbaseline/
+WORKDIR /workspace/newbaseline
+RUN uv sync --frozen --no-dev
+WORKDIR /workspace
 
 # These are the owned implementation, router assets, raw corpus, chunks,
 # embeddings, release summaries, and recorded local experiment artifacts.

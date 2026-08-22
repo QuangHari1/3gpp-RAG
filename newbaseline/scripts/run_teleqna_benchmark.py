@@ -65,9 +65,36 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def vocabulary_manifest_config(settings: Any) -> dict[str, Any]:
+    """Record the effective vocabulary mode and immutable asset fingerprints."""
+    resources = settings.workspace_root / settings.get("rag", "resources_dir")
+    paper_file = settings.get("rag", "vocabulary")
+    definitions_file = settings.get("vocabulary", "definitions_file")
+    abbreviations_file = settings.get("vocabulary", "abbreviations_file")
+    assets = {
+        "paper_vocabulary": paper_file,
+        "definitions": definitions_file,
+        "abbreviations": abbreviations_file,
+    }
+    config: dict[str, Any] = {"vocabulary_mode": settings.get("vocabulary", "mode")}
+    for key in (
+        "contextual_candidate_limit",
+        "contextual_support_top_k",
+        "contextual_min_score",
+        "contextual_min_margin",
+        "contextual_excluded_acronyms",
+    ):
+        config[f"vocabulary_{key}"] = settings.get("vocabulary", key)
+    for role, filename in assets.items():
+        path = resources / filename
+        config[f"vocabulary_{role}_file"] = filename
+        config[f"vocabulary_{role}_sha256"] = file_sha256(path)
+    return config
+
+
 def benchmark_config(settings: Any, args: argparse.Namespace, dataset_path: Path) -> dict[str, Any]:
     """Persist every non-secret setting that can affect a benchmark result."""
-    return {
+    config = {
         "dataset_path": str(dataset_path),
         "dataset_sha256": file_sha256(dataset_path),
         "corpus_release": settings.release,
@@ -88,6 +115,8 @@ def benchmark_config(settings: Any, args: argparse.Namespace, dataset_path: Path
         "workers": args.workers,
         "limit": args.limit,
     }
+    config.update(vocabulary_manifest_config(settings))
+    return config
 
 
 def write_manifest(output_path: Path, config: dict[str, Any]) -> Path:
@@ -252,10 +281,8 @@ def main() -> None:
     manifest_path = write_manifest(args.output, run_config)
     tracker = start_experiment_tracker(
         mode=settings.get("experiment_tracking", "mode"),
-        project=settings.get("experiment_tracking", "project"),
-        entity=settings.get("experiment_tracking", "entity"),
-        artifact_name=settings.get("experiment_tracking", "artifact_name"),
-        run_directory=settings.workspace_root / settings.get("experiment_tracking", "run_directory"),
+        experiment_name=settings.get("experiment_tracking", "experiment_name"),
+        tracking_directory=settings.workspace_root / settings.get("experiment_tracking", "tracking_directory"),
         output_path=args.output,
         config=run_config,
     )

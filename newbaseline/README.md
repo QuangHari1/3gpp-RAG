@@ -19,7 +19,7 @@ experiment. **Do not download, chunk, or embed anything again** in that case.
 | Temperature | `0.0` |
 | Semantic seed chunks | 8 |
 | Citation expansion | Disabled (`citation_max_depth = 0`) |
-| Tracking | W&B offline, stored locally under `results/wandb/` |
+| Tracking | MLflow local SQLite store and artifacts under `results/mlflow/` |
 
 The precomputed corpus contains 252,329 embedded chunks. The full chunk source
 contains 299,412 chunks so citation expansion can be enabled later without
@@ -33,6 +33,8 @@ Run all local commands below **from `newbaseline/`**. The expected layout is:
 Telco-RAG/
 ├── newbaseline/
 │   ├── config.toml
+│   ├── pyproject.toml                    # UV dependency source of truth
+│   ├── uv.lock                           # reproducible Python 3.11 lockfile
 │   ├── resources/                         # router checkpoint and vocabulary
 │   └── scripts/run_teleqna_benchmark.py
 └── dataset/
@@ -71,18 +73,18 @@ Install [uv](https://docs.astral.sh/uv/) and Python 3.11, then:
 
 ```bash
 cd newbaseline
-export UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
-uv run --with-requirements requirements.txt scripts/run_teleqna_benchmark.py --help
+uv sync --all-groups
+uv run scripts/run_teleqna_benchmark.py --help
 ```
 
-`uv` manages the Python environment; do not create or activate a project
-virtual environment manually. `UV_EXTRA_INDEX_URL` makes the pinned CPU-only
-PyTorch wheel available to `uv`; keep it set for the local commands below.
+`pyproject.toml` and `uv.lock` are the dependency source of truth. `uv sync`
+creates the ignored local `.venv` automatically; do not activate it manually.
+The lockfile already pins the CPU-only PyTorch index.
 
 Run one paid smoke-test question before a larger experiment:
 
 ```bash
-uv run --with-requirements requirements.txt \
+uv run \
   scripts/run_teleqna_benchmark.py \
   --limit 1 --workers 1 --progress-every 1 \
   --output results/teleqna/smoke-test.jsonl --no-compare
@@ -96,7 +98,7 @@ Use a new output name for every distinct experiment. Results are appended one
 question at a time, so rerunning the same command resumes safely.
 
 ```bash
-uv run --with-requirements requirements.txt \
+uv run \
   scripts/run_teleqna_benchmark.py \
   --workers 4 --progress-every 10 \
   --output results/teleqna/repro-full.jsonl --no-compare
@@ -114,7 +116,7 @@ take the last 200 numeric questions. It compares the candidate with the
 existing full baseline on exactly the shared scored questions.
 
 ```bash
-uv run --with-requirements requirements.txt \
+uv run \
   scripts/run_teleqna_benchmark.py \
   --reverse --limit 200 --workers 4 --progress-every 10 \
   --output results/teleqna/my-change-tail200.jsonl \
@@ -147,7 +149,7 @@ The full retrieved text is intentionally not repeated in every row.
 Generate error-analysis tables and a readable summary:
 
 ```bash
-uv run --with-requirements requirements.txt \
+uv run \
   scripts/analyze_teleqna_errors.py \
   --results results/teleqna/my-change-tail200.jsonl \
   --output-dir results/analysis/my-change-tail200
@@ -157,10 +159,24 @@ Read `results/analysis/my-change-tail200/summary.md` first. The directory also
 contains CSV/JSON breakdowns for wrong answers, semantic scores, router series,
 and citation paths.
 
-W&B is offline by default. Every run is retained locally under
-`results/wandb/`; no W&B account is needed. Set
-`[experiment_tracking].mode = "disabled"` in `config.toml` to turn this off,
-or change it to `"online"` and authenticate with W&B to sync runs.
+MLflow is local by default. Every benchmark records its config, progress/final
+metrics, result JSONL, manifest, comparison, and available analysis files under
+`results/mlflow/`; no account or cloud upload is needed. Set
+`[experiment_tracking].mode = "disabled"` in `config.toml` to turn this off.
+
+To browse runs locally, keep this command running in a second terminal from
+`newbaseline/`, then open <http://127.0.0.1:5000>:
+
+```bash
+uv run scripts/mlflow_ui.py
+```
+
+To import pre-existing JSONL checkpoints into the same UI once:
+
+```bash
+uv run \
+python scripts/import_teleqna_results_to_mlflow.py
+```
 
 ## Changing retrieval settings
 
@@ -187,6 +203,33 @@ Changing `rephrase_model`, `answer_model`, temperature, retrieval limits, or
 citation settings does **not** require re-embedding. Changing `[embedding]`
 does require new vectors; also set `router_backend = "semantic"` if the
 embedding model is no longer the paper-compatible OpenAI model.
+
+### Vocabulary ablation
+
+`paper_legacy` reads the original paper DOCX and is the paper-equivalent
+baseline. `release18_unambiguous` keeps the 569 copied paper term definitions,
+but expands an acronym only when the provenance-rich Release-18 catalog has
+exactly one meaning.
+
+The default `release18_contextual` adds a semantic second pass only for a
+question containing an ambiguous acronym such as `AMF` or `ARP`:
+
+1. Retrieve seed chunks without expanding that acronym.
+2. Compare each candidate meaning against those seeds and its source-series provenance.
+3. Re-retrieve once with the winner only when its score and margin clear the
+   `[vocabulary]` thresholds; otherwise abstain and retain the acronym.
+
+This does not add an LLM call. The trace stores candidates, scores, confidence,
+margin, and the selected meaning for later error analysis. To reproduce the
+existing unambiguous ablation, change only:
+
+```toml
+[vocabulary]
+mode = "release18_unambiguous"
+```
+
+`contextual_excluded_acronyms = ["3GPP"]` is intentional: `[3GPP Release N]`
+is question metadata, not a term whose sense should affect retrieval.
 
 ## Run with Docker
 
@@ -228,12 +271,11 @@ calls, so it is not part of normal benchmark reproduction.
 From the repository root:
 
 ```bash
-export UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
-uv run --with-requirements newbaseline/requirements.txt \
-  python newbaseline/scripts/run_offline_pipeline.py --mode paper
+uv run --project newbaseline \
+  newbaseline/scripts/run_offline_pipeline.py --mode paper
 
-uv run --with-requirements newbaseline/requirements.txt \
-  python newbaseline/scripts/run_offline_pipeline.py --mode paper --embed --dry-run
+uv run --project newbaseline \
+  newbaseline/scripts/run_offline_pipeline.py --mode paper --embed --dry-run
 ```
 
 Run the final command again with `--embed` (without `--dry-run`) only when you
